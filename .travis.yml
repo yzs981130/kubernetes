@@ -1,0 +1,6 @@
+language: go
+go:
+ - 1.12
+
+script:
+- "make WHAT=cmd/kubelet GOFLAGS=-v"
