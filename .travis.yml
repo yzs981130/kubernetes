@@ -3,5 +3,5 @@ go:
  - 1.12.13
 
 script:
-- "go test k8s.io/kubernetes/pkg/kubelet/cm/devicemanager"
+- "go test ./pkg/kubelet/cm/devicemanager"
 - "make WHAT=cmd/kubelet GOFLAGS=-v"
