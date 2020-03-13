@@ -22,6 +22,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -91,7 +92,19 @@ type ManagerImpl struct {
 	// podDevices contains pod to allocated device mapping.
 	podDevices        podDevices
 	checkpointManager checkpointmanager.CheckpointManager
+
+	// podGroupGPUs contains podgroup to allocated GPU mapping.
+	podGroupGPUs map[string]sets.String
+	// podGroupUnallocatedGPUs contains podgroup to allocated GPU mapping, only use for avoid re-allocate
+	podGroupUnallocatedGPUs map[string]sets.String
+	// podGroupPodUids contains podgroup name to pod uids
+	podGroupPodUids map[string]sets.String
 }
+
+// const name for podgroup GPU sharing
+const (
+	podGroupName string = "scheduling.k8s.io/group-name"
+)
 
 type endpointInfo struct {
 	e    endpoint
@@ -119,12 +132,15 @@ func newManagerImpl(socketPath string) (*ManagerImpl, error) {
 	manager := &ManagerImpl{
 		endpoints: make(map[string]endpointInfo),
 
-		socketname:       file,
-		socketdir:        dir,
-		healthyDevices:   make(map[string]sets.String),
-		unhealthyDevices: make(map[string]sets.String),
-		allocatedDevices: make(map[string]sets.String),
-		podDevices:       make(podDevices),
+		socketname:              file,
+		socketdir:               dir,
+		healthyDevices:          make(map[string]sets.String),
+		unhealthyDevices:        make(map[string]sets.String),
+		allocatedDevices:        make(map[string]sets.String),
+		podDevices:              make(podDevices),
+		podGroupGPUs:            make(map[string]sets.String),
+		podGroupUnallocatedGPUs: make(map[string]sets.String),
+		podGroupPodUids:         make(map[string]sets.String),
 	}
 	manager.callback = manager.genericDeviceUpdateCallback
 
@@ -319,6 +335,70 @@ func (m *ManagerImpl) isVersionCompatibleWithPlugin(versions []string) bool {
 	return false
 }
 
+// selectContainerPodGroupGPUDevs plays a similar role like devicesToAllocate
+// it selects the container's limit GPU resource, marks as allocated and return the devs
+// it holds m.mutex for modifying m.podGroupGPUs and m.allocatedDevices
+// when called, it checks if there's existing m.podGroupGPUs from the pod annotation
+// allocate podGroupGPUCnts GPU to the whole podGroup
+// now the podGroup has sufficient GPU
+// we allocate container's need from the given podGroupGPU devs
+// this part is designed re-entrant for code simplicity
+func (m *ManagerImpl) selectContainerPodGroupGPUDevs(pod *v1.Pod, container *v1.Container, containerNeeded int) (sets.String, error) {
+	// check if pod has annotation
+	if _, ok := pod.Annotations[podGroupName]; !ok {
+		return nil, fmt.Errorf("pod %s:%s doesn't have a podGroupName", pod.Namespace, pod.Name)
+	}
+
+	// get podGroupGPU info from pod annotation
+	// podGroupGPUs needs mutex to acquire R/W consistency
+	// TODO: consider container restarts and device reuse
+	// TODO: optimize mutex performance
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	devices := sets.NewString()
+	gpuResourceName := "nvidia.com/gpu"
+
+	// add pod uid to podgroup
+	if m.podGroupPodUids[pod.Annotations[podGroupName]].Len() == 0 {
+		m.podGroupPodUids[pod.Annotations[podGroupName]] = sets.NewString(string(pod.UID))
+	} else {
+		m.podGroupPodUids[pod.Annotations[podGroupName]].Insert(string(pod.UID))
+	}
+
+	// first met podGroup
+	// allocate total GPU and store in m.podGroupGPUs[pod.Annotations[podGroupName]]
+	// we mark these as allocated in case pod allocation is concurrent
+	if _, ok := m.podGroupGPUs[pod.Annotations[podGroupName]]; !ok {
+		// try to select pod.Annotations[podGroupName] GPU
+		needed, _ := strconv.Atoi(pod.Annotations[pod.Annotations[podGroupName]])
+		klog.V(3).Infof("needs %d %s", needed, gpuResourceName)
+
+		// Gets a list of available devices.
+		devicesInUse := m.allocatedDevices[gpuResourceName]
+		available := m.healthyDevices[gpuResourceName].Difference(devicesInUse)
+		if available.Len() < needed {
+			// remain m.podGroupGPUs[pod.Annotations[podGroupName]] == nil
+			return nil, fmt.Errorf("PodGroup %s requested number of devices unavailable for %s. Requested: %d, Available: %d",
+				pod.Annotations[podGroupName], gpuResourceName, needed, available.Len())
+		}
+		allocated := available.UnsortedList()[:needed]
+		// if we only select the devID now, there will remain concurrent problem
+		// or we should mark these as allocated and modify the true allocation logic
+		for _, device := range allocated {
+			m.allocatedDevices[gpuResourceName].Insert(device)
+			devices.Insert(device)
+		}
+		// make podGroupName->devs mapping by deep copy
+		m.podGroupUnallocatedGPUs[pod.Annotations[podGroupName]] = sets.NewString(devices.UnsortedList()...)
+		m.podGroupGPUs[pod.Annotations[podGroupName]] = sets.NewString(devices.UnsortedList()...)
+	}
+
+	// allocate GPU devs for container from m.podGroupGPUs[pod.Annotations[podGroupName]]
+	containerAllocGPU := m.podGroupUnallocatedGPUs[pod.Annotations[podGroupName]].UnsortedList()[:containerNeeded]
+	m.podGroupUnallocatedGPUs[pod.Annotations[podGroupName]].Delete(containerAllocGPU...)
+	return sets.NewString(containerAllocGPU...), nil
+}
+
 func (m *ManagerImpl) allocatePodResources(pod *v1.Pod) error {
 	devicesToReuse := make(map[string]sets.String)
 	for _, container := range pod.Spec.InitContainers {
@@ -329,6 +409,9 @@ func (m *ManagerImpl) allocatePodResources(pod *v1.Pod) error {
 	}
 	for _, container := range pod.Spec.Containers {
 		if err := m.allocateContainerResources(pod, &container, devicesToReuse); err != nil {
+			return err
+		}
+		if err := m.allocateContainerGPUResources(pod, &container, devicesToReuse); err != nil {
 			return err
 		}
 		m.podDevices.removeContainerAllocatedResources(string(pod.UID), container.Name, devicesToReuse)
@@ -524,8 +607,12 @@ func (m *ManagerImpl) writeCheckpoint() error {
 	for resource, devices := range m.healthyDevices {
 		registeredDevs[resource] = devices.UnsortedList()
 	}
+	podGroupGPUs := make(map[string][]string)
+	for pgname, gpus := range m.podGroupGPUs {
+		podGroupGPUs[pgname] = gpus.UnsortedList()
+	}
 	data := checkpoint.New(m.podDevices.toCheckpointData(),
-		registeredDevs)
+		registeredDevs, podGroupGPUs)
 	m.mutex.Unlock()
 	err := m.checkpointManager.CreateCheckpoint(kubeletDeviceManagerCheckpoint, data)
 	if err != nil {
@@ -538,8 +625,9 @@ func (m *ManagerImpl) writeCheckpoint() error {
 // m.allocatedDevices accordingly.
 func (m *ManagerImpl) readCheckpoint() error {
 	registeredDevs := make(map[string][]string)
+	podGroupGPU := make(map[string][]string)
 	devEntries := make([]checkpoint.PodDevicesEntry, 0)
-	cp := checkpoint.New(devEntries, registeredDevs)
+	cp := checkpoint.New(devEntries, registeredDevs, podGroupGPU)
 	err := m.checkpointManager.GetCheckpoint(kubeletDeviceManagerCheckpoint, cp)
 	if err != nil {
 		if err == errors.ErrCheckpointNotFound {
@@ -550,7 +638,7 @@ func (m *ManagerImpl) readCheckpoint() error {
 	}
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-	podDevices, registeredDevs := cp.GetData()
+	podDevices, registeredDevs, podGroupGPUs := cp.GetData()
 	m.podDevices.fromCheckpointData(podDevices)
 	m.allocatedDevices = m.podDevices.devices()
 	for resource := range registeredDevs {
@@ -559,6 +647,9 @@ func (m *ManagerImpl) readCheckpoint() error {
 		m.healthyDevices[resource] = sets.NewString()
 		m.unhealthyDevices[resource] = sets.NewString()
 		m.endpoints[resource] = endpointInfo{e: newStoppedEndpointImpl(resource), opts: nil}
+	}
+	for pgname, gpus := range podGroupGPUs {
+		m.podGroupGPUs[pgname] = sets.NewString(gpus...)
 	}
 	return nil
 }
@@ -571,9 +662,47 @@ func (m *ManagerImpl) updateAllocatedDevices(activePods []*v1.Pod) {
 	}
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
+
+	// this is the only place for doing `m.podDevices`'s garbage collection
+	// do almost the same thing to `m.podGroupGPUs`
+	// we have all active pod: activePods
+	// get their podGroupName if exists
+
+	// do m.podGroupGPUs's gc first
+	activePodGroupName := sets.NewString()
+	for _, v := range activePods {
+		// skip if not exists
+		if _, ok := v.Annotations[podGroupName]; !ok {
+			continue
+		}
+		activePodGroupName.Insert(v.Annotations[podGroupName])
+	}
+	// get current name in m.podGroupGPUs
+	allocatedPodGroupName := sets.NewString()
+	for k := range m.podGroupGPUs {
+		allocatedPodGroupName.Insert(k)
+	}
+	podGroupNameToBeRemoved := allocatedPodGroupName.Difference(activePodGroupName)
+	if len(podGroupNameToBeRemoved) > 0 {
+		klog.V(3).Infof("podGroup names to be removed: %v", podGroupNameToBeRemoved.List())
+		// gc them now
+		for _, v := range podGroupNameToBeRemoved.List() {
+			delete(m.podGroupGPUs, v)
+			delete(m.podGroupUnallocatedGPUs, v)
+			delete(m.podGroupPodUids, v)
+		}
+	}
+
+	// do m.podDevices's gc later
 	activePodUids := sets.NewString()
 	for _, pod := range activePods {
 		activePodUids.Insert(string(pod.UID))
+	}
+	// all pods in podGroup[activePodGroupName] should be marked as active
+	for _, pgname := range activePodGroupName.List() {
+		for _, podUid := range m.podGroupPodUids[pgname].List() {
+			activePodUids.Insert(podUid)
+		}
 	}
 	allocatedPodUids := m.podDevices.pods()
 	podsToBeRemoved := allocatedPodUids.Difference(activePodUids)
@@ -644,6 +773,95 @@ func (m *ManagerImpl) devicesToAllocate(podUID, contName, resource string, requi
 	return devices, nil
 }
 
+// allocateContainerGPUResources handles both default GPU resource
+// and GPU topo job (pod with pod.Labels[GPUtopology] = true)
+// default: do the same allocation with allocateContainerResources
+// GPU topo job: get per container's allocDevices, store it and does
+// the true allocation later
+
+func (m *ManagerImpl) allocateContainerGPUResources(pod *v1.Pod, container *v1.Container, devicesToReuse map[string]sets.String) error {
+	// check if pod has gpu as resources limits
+	if _, exist := container.Resources.Limits["nvidia.com/gpu"]; !exist {
+		return nil
+	}
+	podUID := string(pod.UID)
+	contName := container.Name
+
+	gpuResourceName := "nvidia.com/gpu"
+	//needed := int(container.Resources.Limits["nvidia.com/gpu"].Value())
+	v := container.Resources.Limits["nvidia.com/gpu"]
+	needed := int(v.Value())
+	klog.V(3).Infof("needs %d %s", needed, gpuResourceName)
+	// Updates allocatedDevices to garbage collect any stranded resources
+	// before doing the device plugin allocation.
+	m.updateAllocatedDevices(m.activePods())
+	allocDevices := make(sets.String)
+	var err error
+	// TODO: discuss about whether we should allocate entire GPU in all jobs or just for GPUtopology job
+	// benefit: easier to apply advanced allocation techniques
+	// shortcomings: performance/recovery
+	if _, ok := pod.Annotations[podGroupName]; !ok {
+		allocDevices, err = m.devicesToAllocate(podUID, contName, gpuResourceName, needed, devicesToReuse[gpuResourceName])
+	} else {
+		allocDevices, err = m.selectContainerPodGroupGPUDevs(pod, container, needed)
+	}
+	//allocDevices, err := m.devicesToAllocate(podUID, contName, resource, needed, devicesToReuse[resource])
+	if err != nil {
+		return err
+	}
+	if allocDevices == nil || len(allocDevices) <= 0 {
+		return nil
+	}
+
+	devs := allocDevices.UnsortedList()
+	topodevs := m.podGroupGPUs[pod.Annotations[podGroupName]].UnsortedList()
+
+	startRPCTime := time.Now()
+	m.mutex.Lock()
+	eI, ok := m.endpoints[gpuResourceName]
+	m.mutex.Unlock()
+	if !ok {
+		m.mutex.Lock()
+		m.allocatedDevices = m.podDevices.devices()
+		m.mutex.Unlock()
+		return fmt.Errorf("Unknown Device Plugin %s", gpuResourceName)
+	}
+	// TODO: refactor this part of code to just append a ContainerAllocationRequest
+	// in a passed in AllocateRequest pointer, and issues a single Allocate call per pod.
+	klog.V(3).Infof("Making allocation request for devices %v for device plugin %s", devs, gpuResourceName)
+	klog.V(3).Infof("Making allocation request for topo devices %v for device plugin %s", topodevs, gpuResourceName)
+
+	var resp *pluginapi.AllocateResponse
+	if _, ok := pod.Annotations[podGroupName]; ok {
+		resp, err = eI.e.allocate(topodevs)
+	} else {
+		resp, err = eI.e.allocate(devs)
+	}
+
+	metrics.DevicePluginAllocationDuration.WithLabelValues(gpuResourceName).Observe(metrics.SinceInSeconds(startRPCTime))
+	metrics.DeprecatedDevicePluginAllocationLatency.WithLabelValues(gpuResourceName).Observe(metrics.SinceInMicroseconds(startRPCTime))
+	if err != nil {
+		// In case of allocation failure, we want to restore m.allocatedDevices
+		// to the actual allocated state from m.podDevices.
+		m.mutex.Lock()
+		m.allocatedDevices = m.podDevices.devices()
+		m.mutex.Unlock()
+		return err
+	}
+
+	if len(resp.ContainerResponses) == 0 {
+		return fmt.Errorf("No containers return in allocation response %v", resp)
+	}
+
+	// Update internal cached podDevices state.
+	m.mutex.Lock()
+	m.podDevices.insert(podUID, contName, gpuResourceName, allocDevices, resp.ContainerResponses[0])
+	m.mutex.Unlock()
+
+	// Checkpoints device to container allocation information.
+	return m.writeCheckpoint()
+}
+
 // allocateContainerResources attempts to allocate all of required device
 // plugin resources for the input container, issues an Allocate rpc request
 // for each new device resource requirement, processes their AllocateResponses,
@@ -660,7 +878,7 @@ func (m *ManagerImpl) allocateContainerResources(pod *v1.Pod, container *v1.Cont
 		resource := string(k)
 		needed := int(v.Value())
 		klog.V(3).Infof("needs %d %s", needed, resource)
-		if !m.isDevicePluginResource(resource) {
+		if !m.isDevicePluginResource(resource) || resource == "nvidia.com/gpu" {
 			continue
 		}
 		// Updates allocatedDevices to garbage collect any stranded resources

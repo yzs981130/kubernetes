@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -595,16 +596,19 @@ func getTestManager(tmpDir string, activePods ActivePodsFunc, testRes []TestReso
 		return nil, err
 	}
 	testManager := &ManagerImpl{
-		socketdir:         tmpDir,
-		callback:          monitorCallback,
-		healthyDevices:    make(map[string]sets.String),
-		unhealthyDevices:  make(map[string]sets.String),
-		allocatedDevices:  make(map[string]sets.String),
-		endpoints:         make(map[string]endpointInfo),
-		podDevices:        make(podDevices),
-		activePods:        activePods,
-		sourcesReady:      &sourcesReadyStub{},
-		checkpointManager: ckm,
+		socketdir:               tmpDir,
+		callback:                monitorCallback,
+		healthyDevices:          make(map[string]sets.String),
+		unhealthyDevices:        make(map[string]sets.String),
+		allocatedDevices:        make(map[string]sets.String),
+		endpoints:               make(map[string]endpointInfo),
+		podDevices:              make(podDevices),
+		podGroupGPUs:            make(map[string]sets.String),
+		podGroupUnallocatedGPUs: make(map[string]sets.String),
+		podGroupPodUids:         make(map[string]sets.String),
+		activePods:              activePods,
+		sourcesReady:            &sourcesReadyStub{},
+		checkpointManager:       ckm,
 	}
 
 	for _, res := range testRes {
@@ -638,6 +642,12 @@ func getTestManager(tmpDir string, activePods ActivePodsFunc, testRes []TestReso
 						return resps, nil
 					},
 				},
+				opts: nil,
+			}
+		}
+		if res.resourceName == "nvidia.com/gpu" {
+			testManager.endpoints[res.resourceName] = endpointInfo{
+				e:    &MockEndpoint{allocateFunc: allocateGPUStubFunc()},
 				opts: nil,
 			}
 		}
@@ -1039,5 +1049,170 @@ func allocateStubFunc() func(devs []string) (*pluginapi.AllocateResponse, error)
 		resps := new(pluginapi.AllocateResponse)
 		resps.ContainerResponses = append(resps.ContainerResponses, resp)
 		return resps, nil
+	}
+}
+
+// allocate all devs into container, inject env like nvidia/k8s-device-plugin does
+func allocateGPUStubFunc() func(devs []string) (*pluginapi.AllocateResponse, error) {
+	return func(devs []string) (*pluginapi.AllocateResponse, error) {
+		resp := pluginapi.ContainerAllocateResponse{
+			Envs: map[string]string{
+				"NVIDIA_VISIBLE_DEVICES": strings.Join(devs, ","),
+			},
+		}
+		resps := new(pluginapi.AllocateResponse)
+		resps.ContainerResponses = append(resps.ContainerResponses, &resp)
+		return resps, nil
+	}
+}
+
+// Test GPU allocation based on TestPodContainerDeviceAllocation
+func TestPodContainerGPUAllocation(t *testing.T) {
+	res1 := TestResource{
+		resourceName:     "nvidia.com/gpu",
+		resourceQuantity: *resource.NewQuantity(int64(1), resource.DecimalSI),
+	}
+	totalResource := TestResource{
+		resourceName:     "nvidia.com/gpu",
+		resourceQuantity: *resource.NewQuantity(int64(4), resource.DecimalSI),
+		devs:             []string{"gpu-1", "gpu-2", "gpu-3", "gpu-4", "gpu-5", "gpu-6", "gpu-7", "gpu-8"},
+	}
+	testResources := make([]TestResource, 1)
+	testResources = append(testResources, totalResource)
+	as := require.New(t)
+	podsStub := activePodsStub{
+		activePods: []*v1.Pod{},
+	}
+	tmpDir, err := ioutil.TempDir("", "checkpoint")
+	as.Nil(err)
+	defer os.RemoveAll(tmpDir)
+	nodeInfo := getTestNodeInfo(v1.ResourceList{})
+	testManager, err := getTestManager(tmpDir, podsStub.getActivePods, testResources)
+	as.Nil(err)
+
+	testPods := []*v1.Pod{
+		makePod(v1.ResourceList{
+			v1.ResourceName(res1.resourceName): res1.resourceQuantity,
+		}),
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				UID: uuid.NewUUID(),
+			},
+			Spec: v1.PodSpec{
+				Containers: []v1.Container{
+					{
+						Name: string(uuid.NewUUID()),
+						Resources: v1.ResourceRequirements{
+							Limits: v1.ResourceList{
+								v1.ResourceName(res1.resourceName): res1.resourceQuantity,
+							},
+						},
+					},
+					{
+						Name: string(uuid.NewUUID()),
+						Resources: v1.ResourceRequirements{
+							Limits: v1.ResourceList{
+								v1.ResourceName(res1.resourceName): res1.resourceQuantity,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				UID: uuid.NewUUID(),
+				Annotations: map[string]string{
+					podGroupName: "pg-1",
+					"pg-1":       "2",
+				},
+			},
+			Spec: v1.PodSpec{
+				Containers: []v1.Container{
+					{
+						Name: string(uuid.NewUUID()),
+						Resources: v1.ResourceRequirements{
+							Limits: v1.ResourceList{
+								v1.ResourceName(res1.resourceName): res1.resourceQuantity,
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				UID: uuid.NewUUID(),
+				Annotations: map[string]string{
+					podGroupName: "pg-1",
+					"pg-1":       "2",
+				},
+			},
+			Spec: v1.PodSpec{
+				Containers: []v1.Container{
+					{
+						Name: string(uuid.NewUUID()),
+						Resources: v1.ResourceRequirements{
+							Limits: v1.ResourceList{
+								v1.ResourceName(res1.resourceName): res1.resourceQuantity,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	testCases := []struct {
+		description                      string
+		testPod                          *v1.Pod
+		expectedAllocatedGPUEnvCharCount int
+		expectedAllocatedGPUCount        int
+		expErr                           error
+	}{
+		{
+			description:                      "Successful allocation of origin GPU for one pod",
+			testPod:                          testPods[0],
+			expectedAllocatedGPUEnvCharCount: 5,
+			expectedAllocatedGPUCount:        1,
+			expErr:                           nil,
+		},
+		{
+			description:                      "Successful allocation of origin GPU for one pod with multiple containers",
+			testPod:                          testPods[1],
+			expectedAllocatedGPUEnvCharCount: 5,
+			expectedAllocatedGPUCount:        3,
+			expErr:                           nil,
+		},
+		{
+			description:                      "Successful allocation of podGroup GPU sharing for the first pod",
+			testPod:                          testPods[2],
+			expectedAllocatedGPUEnvCharCount: 11,
+			expectedAllocatedGPUCount:        5, // all podgroup GPU will be marked as allocated when the first pod is being allocated
+			expErr:                           nil,
+		},
+		{
+			description:                      "Successful allocation of podGroup GPU sharing for the second pod",
+			testPod:                          testPods[3],
+			expectedAllocatedGPUEnvCharCount: 11,
+			expectedAllocatedGPUCount:        5,
+			expErr:                           nil,
+		},
+	}
+	activePods := []*v1.Pod{}
+	for _, testCase := range testCases {
+		pod := testCase.testPod
+		activePods = append(activePods, pod)
+		podsStub.updateActivePods(activePods)
+		err := testManager.Allocate(nodeInfo, &lifecycle.PodAdmitAttributes{Pod: pod})
+		if !reflect.DeepEqual(err, testCase.expErr) {
+			t.Errorf("DevicePluginManager error (%v). expected error: %v but got: %v",
+				testCase.description, testCase.expErr, err)
+		}
+		runContainerOpts, err := testManager.GetDeviceRunContainerOptions(pod, &pod.Spec.Containers[0])
+		as.Nil(err)
+		as.Equal(testCase.expectedAllocatedGPUEnvCharCount, len(runContainerOpts.Envs[0].Value))
+
+		as.Equal(testCase.expectedAllocatedGPUCount, testManager.allocatedDevices[res1.resourceName].Len())
 	}
 }

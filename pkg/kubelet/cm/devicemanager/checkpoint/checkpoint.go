@@ -26,7 +26,7 @@ import (
 // DeviceManagerCheckpoint defines the operations to retrieve pod devices
 type DeviceManagerCheckpoint interface {
 	checkpointmanager.Checkpoint
-	GetData() ([]PodDevicesEntry, map[string][]string)
+	GetData() ([]PodDevicesEntry, map[string][]string, map[string][]string)
 }
 
 // PodDevicesEntry connects pod information to devices
@@ -44,6 +44,7 @@ type PodDevicesEntry struct {
 type checkpointData struct {
 	PodDeviceEntries  []PodDevicesEntry
 	RegisteredDevices map[string][]string
+	PodGroupGPUs      map[string][]string
 }
 
 // Data holds checkpoint data and its checksum
@@ -54,11 +55,12 @@ type Data struct {
 
 // New returns an instance of Checkpoint
 func New(devEntries []PodDevicesEntry,
-	devices map[string][]string) DeviceManagerCheckpoint {
+	devices map[string][]string, podGroupGPU map[string][]string) DeviceManagerCheckpoint {
 	return &Data{
 		Data: checkpointData{
 			PodDeviceEntries:  devEntries,
 			RegisteredDevices: devices,
+			PodGroupGPUs:      podGroupGPU,
 		},
 	}
 }
@@ -80,6 +82,6 @@ func (cp *Data) VerifyChecksum() error {
 }
 
 // GetData returns device entries and registered devices
-func (cp *Data) GetData() ([]PodDevicesEntry, map[string][]string) {
-	return cp.Data.PodDeviceEntries, cp.Data.RegisteredDevices
+func (cp *Data) GetData() ([]PodDevicesEntry, map[string][]string, map[string][]string) {
+	return cp.Data.PodDeviceEntries, cp.Data.RegisteredDevices, cp.Data.PodGroupGPUs
 }
