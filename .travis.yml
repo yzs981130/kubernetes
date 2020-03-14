@@ -2,6 +2,11 @@ language: go
 go:
  - 1.12.13
 
+before_install:
+ - mkdir -p $GOPATH/src/k8s.io/kubernetes
+ - ln -svf $TRAVIS_BUILD_DIR $GOPATH/src/k8s.io/kubernetes
+ - cd $GOPATH/src/k8s.io/kubernetes
+
 script:
-- "go test ./pkg/kubelet/cm/devicemanager"
-- "make WHAT=cmd/kubelet GOFLAGS=-v"
+ - "go test k8s.io/kubernetes/pkg/kubelet/cm/devicemanager"
+ - "make WHAT=cmd/kubelet GOFLAGS=-v"
