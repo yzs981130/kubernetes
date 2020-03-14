@@ -3,10 +3,7 @@ go:
  - 1.12.13
 
 before_install:
- - ls -la $GOPATH/src/k8s.io/kubernetes
- - echo "WHAT THE FUCK"
- - rm -rf $GOPATH/src/k8s.io/kubernetes
- - mkdir -p $GOPATH/src/k8s.io/kubernetes
+ - mkdir -p $GOPATH/src/k8s.io/
  - ln -svf $TRAVIS_BUILD_DIR $GOPATH/src/k8s.io/kubernetes
  - cd $GOPATH/src/k8s.io/kubernetes
 
