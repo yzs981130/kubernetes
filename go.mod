@@ -14,8 +14,8 @@ require (
 	github.com/JeffAshton/win_pdh v0.0.0-20161109143554-76bb4ee9f0ab
 	github.com/MakeNowJust/heredoc v0.0.0-20170808103936-bb23615498cd
 	github.com/Microsoft/go-winio v0.4.11
-	github.com/Microsoft/hcsshim v0.8.6
 	github.com/PuerkitoBio/purell v1.1.0
+	github.com/Microsoft/hcsshim v0.0.0-20190417211021-672e52e9209d
 	github.com/Rican7/retry v0.1.0 // indirect
 	github.com/armon/circbuf v0.0.0-20150827004946-bbbad097214e
 	github.com/auth0/go-jwt-middleware v0.0.0-20170425171159-5493cabe49f7 // indirect
@@ -153,7 +153,7 @@ require (
 	github.com/xlab/handysort v0.0.0-20150421192137-fb3537ed64a1 // indirect
 	golang.org/x/crypto v0.0.0-20181025213731-e84da0312774
 	golang.org/x/lint v0.0.0-20181217174547-8f45f776aaf1
-	golang.org/x/net v0.0.0-20190206173232-65e2d4e15006
+	golang.org/x/net v0.0.0-20190812203447-cdfb69ac37fc
 	golang.org/x/oauth2 v0.0.0-20190402181905-9f3314589c9a
 	golang.org/x/sys v0.0.0-20190312061237-fead79001313
 	golang.org/x/time v0.0.0-20161028155119-f51c12702a4d
@@ -163,7 +163,7 @@ require (
 	google.golang.org/grpc v1.13.0
 	gopkg.in/gcfg.v1 v1.2.0
 	gopkg.in/square/go-jose.v2 v2.0.0-20180411045311-89060dee6a84
-	gopkg.in/yaml.v2 v2.2.1
+	gopkg.in/yaml.v2 v2.2.4
 	k8s.io/api v0.0.0
 	k8s.io/apiextensions-apiserver v0.0.0
 	k8s.io/apimachinery v0.0.0
@@ -207,7 +207,7 @@ replace (
 	github.com/JeffAshton/win_pdh => github.com/JeffAshton/win_pdh v0.0.0-20161109143554-76bb4ee9f0ab
 	github.com/MakeNowJust/heredoc => github.com/MakeNowJust/heredoc v0.0.0-20170808103936-bb23615498cd
 	github.com/Microsoft/go-winio => github.com/Microsoft/go-winio v0.4.11
-	github.com/Microsoft/hcsshim => github.com/Microsoft/hcsshim v0.8.6
+	github.com/Microsoft/hcsshim => github.com/Microsoft/hcsshim v0.0.0-20190417211021-672e52e9209d
 	github.com/NYTimes/gziphandler => github.com/NYTimes/gziphandler v0.0.0-20170623195520-56545f4a5d46
 	github.com/PuerkitoBio/purell => github.com/PuerkitoBio/purell v1.1.0
 	github.com/PuerkitoBio/urlesc => github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578
@@ -404,7 +404,7 @@ replace (
 	golang.org/x/image => golang.org/x/image v0.0.0-20190227222117-0694c2d4d067
 	golang.org/x/lint => golang.org/x/lint v0.0.0-20181217174547-8f45f776aaf1
 	golang.org/x/mobile => golang.org/x/mobile v0.0.0-20190312151609-d3739f865fa6
-	golang.org/x/net => golang.org/x/net v0.0.0-20190206173232-65e2d4e15006
+	golang.org/x/net => golang.org/x/net v0.0.0-20190812203447-cdfb69ac37fc
 	golang.org/x/oauth2 => golang.org/x/oauth2 v0.0.0-20190402181905-9f3314589c9a
 	golang.org/x/sync => golang.org/x/sync v0.0.0-20181108010431-42b317875d0f
 	golang.org/x/sys => golang.org/x/sys v0.0.0-20190209173611-3b5209105503
@@ -426,7 +426,7 @@ replace (
 	gopkg.in/tomb.v1 => gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7
 	gopkg.in/warnings.v0 => gopkg.in/warnings.v0 v0.1.1
 	gopkg.in/yaml.v1 => gopkg.in/yaml.v1 v1.0.0-20140924161607-9f9df34309c0
-	gopkg.in/yaml.v2 => gopkg.in/yaml.v2 v2.2.1
+	gopkg.in/yaml.v2 => gopkg.in/yaml.v2 v2.2.4
 	gotest.tools => gotest.tools v2.2.0+incompatible
 	k8s.io/api => ./staging/src/k8s.io/api
 	k8s.io/apiextensions-apiserver => ./staging/src/k8s.io/apiextensions-apiserver
