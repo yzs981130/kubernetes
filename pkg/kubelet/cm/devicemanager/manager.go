@@ -373,6 +373,10 @@ func (m *ManagerImpl) selectContainerPodGroupGPUDevs(pod *v1.Pod, container *v1.
 		needed, _ := strconv.Atoi(pod.Annotations[pod.Annotations[podGroupName]])
 		klog.V(3).Infof("needs %d %s", needed, gpuResourceName)
 
+		if m.allocatedDevices[gpuResourceName] == nil {
+			m.allocatedDevices[gpuResourceName] = sets.NewString()
+		}
+
 		// Gets a list of available devices.
 		devicesInUse := m.allocatedDevices[gpuResourceName]
 		available := m.healthyDevices[gpuResourceName].Difference(devicesInUse)
@@ -394,7 +398,12 @@ func (m *ManagerImpl) selectContainerPodGroupGPUDevs(pod *v1.Pod, container *v1.
 	}
 
 	// allocate GPU devs for container from m.podGroupGPUs[pod.Annotations[podGroupName]]
-	containerAllocGPU := m.podGroupUnallocatedGPUs[pod.Annotations[podGroupName]].UnsortedList()[:containerNeeded]
+	// check first to avoid panic
+	available := m.podGroupUnallocatedGPUs[pod.Annotations[podGroupName]]
+	if available.Len() < containerNeeded {
+		return nil, fmt.Errorf("requested number of devices unavailable for %s. Requested: %d, Available: %d", gpuResourceName, containerNeeded, available.Len())
+	}
+	containerAllocGPU := available.UnsortedList()[:containerNeeded]
 	m.podGroupUnallocatedGPUs[pod.Annotations[podGroupName]].Delete(containerAllocGPU...)
 	return sets.NewString(containerAllocGPU...), nil
 }
