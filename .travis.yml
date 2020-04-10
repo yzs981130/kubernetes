@@ -18,3 +18,5 @@ deploy:
   skip_cleanup: true
   file_glob: true
   file: _output/bin/kubelet
+  on:
+   branch: PodGroupAllocation-1.15.5
