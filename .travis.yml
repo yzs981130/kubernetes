@@ -20,4 +20,3 @@ deploy:
   file: _output/bin/kubelet
   on:
     repo: yzs981130/cuda-wrapper
-    tags: true
