@@ -18,5 +18,3 @@ deploy:
   skip_cleanup: true
   file_glob: true
   file: _output/bin/kubelet
-  on:
-    repo: yzs981130/cuda-wrapper
